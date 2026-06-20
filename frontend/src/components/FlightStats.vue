@@ -79,6 +79,78 @@ function handleExport() {
       </div>
     </div>
 
+    <div v-if="store.simProgress > 0 || store.isInterrupted || store.isSimulating" class="border-t border-slate-700 pt-2 space-y-2">
+      <h4 class="text-xs font-bold text-emerald-400 mb-1">
+        📍 断点续飞进度
+      </h4>
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">已飞距离</div>
+          <div class="text-sm font-bold text-emerald-400">
+            {{ (store.flownDistance / 1000).toFixed(2) }}
+            <span class="text-[10px] text-slate-500">km</span>
+          </div>
+        </div>
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">剩余距离</div>
+          <div class="text-sm font-bold text-amber-400">
+            {{ (store.remainingDistance / 1000).toFixed(2) }}
+            <span class="text-[10px] text-slate-500">km</span>
+          </div>
+        </div>
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">已用时间</div>
+          <div class="text-sm font-bold text-emerald-400">
+            {{ formatTime(store.elapsedFlightTime) }}
+          </div>
+        </div>
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">剩余时间</div>
+          <div class="text-sm font-bold text-amber-400">
+            {{ formatTime(store.remainingFlightTime) }}
+          </div>
+        </div>
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">已耗电</div>
+          <div class="text-sm font-bold" :style="{ color: batteryColor(store.batteryUsed) }">
+            {{ store.batteryUsed.toFixed(1) }}%
+          </div>
+        </div>
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">剩余电量</div>
+          <div class="text-sm font-bold" :style="{ color: batteryColor(100 - store.batteryRemaining) }">
+            {{ store.batteryRemaining.toFixed(1) }}%
+          </div>
+        </div>
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">已完航点</div>
+          <div class="text-sm font-bold text-emerald-400">
+            {{ store.waypointsCompletedCount }}
+          </div>
+        </div>
+        <div class="bg-slate-900 rounded p-2">
+          <div class="text-slate-400">剩余航点</div>
+          <div class="text-sm font-bold text-amber-400">
+            {{ store.waypointsRemainingCount }}
+          </div>
+        </div>
+      </div>
+      <div v-if="store.currentWaypoint" class="bg-slate-900 rounded p-2 text-xs">
+        <div class="text-slate-400">当前航点</div>
+        <div class="text-sky-300 font-mono mt-0.5">
+          #{{ store.flightProgress.currentWaypointIndex + 1 }}
+          ({{ store.currentWaypoint.lat.toFixed(4) }},
+          {{ store.currentWaypoint.lng.toFixed(4) }})
+        </div>
+      </div>
+      <div v-if="store.resumeCount > 0" class="bg-slate-900 rounded p-2 text-xs">
+        <div class="text-slate-400">续飞次数</div>
+        <div class="text-purple-400 font-bold text-sm mt-0.5">
+          {{ store.resumeCount }} 次
+        </div>
+      </div>
+    </div>
+
     <div class="border-t border-slate-700 pt-2">
       <h4 class="text-xs text-slate-400 mb-1">无人机配置</h4>
       <div class="grid grid-cols-3 gap-1 text-[10px] text-slate-500">

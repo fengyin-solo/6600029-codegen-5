@@ -37,3 +37,35 @@ export interface DroneConfig {
   consumptionRate: number;  // mAh/min
   safeDistance: number;     // meters from obstacles
 }
+
+export interface FlightSegmentStats {
+  totalDistance: number;
+  estimatedTime: number;
+  batteryUsage: number;
+}
+
+export interface FlightProgress {
+  currentWaypointIndex: number;
+  waypointsCompleted: string[];
+  flownDistance: number;
+  elapsedTime: number;
+  batteryUsed: number;
+  startTime: number | null;
+  interruptTime: number | null;
+  resumeCount: number;
+}
+
+export interface FlightCheckpoint {
+  id: string;
+  planId: string;
+  planName: string;
+  createdAt: number;
+  interruptedAtWaypointIndex: number;
+  lastWaypointId: string;
+  lastPosition: { lat: number; lng: number; altitude: number };
+  remainingWaypoints: Waypoint[];
+  completedWaypoints: Waypoint[];
+  progress: FlightProgress;
+  totalStats: FlightSegmentStats;
+  remainingStats: FlightSegmentStats;
+}

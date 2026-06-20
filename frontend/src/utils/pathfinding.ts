@@ -1,4 +1,4 @@
-import type { Waypoint, NoFlyZone, TerrainPoint, FlightPlan, DroneConfig } from '../types';
+import type { Waypoint, NoFlyZone, TerrainPoint, FlightPlan, DroneConfig, FlightSegmentStats } from '../types';
 
 // ─── Haversine distance ─────────────────────────────────────────────────────
 export function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -392,3 +392,45 @@ export const mockTerrainData: TerrainPoint[] = (() => {
   }
   return points;
 })();
+
+// ─── Partial Flight Statistics (for resumable flights) ─────────────────────
+export function calculateSegmentStats(
+  waypoints: Waypoint[],
+  config: DroneConfig,
+  startIndex = 0,
+  endIndex?: number
+): FlightSegmentStats {
+  const actualEnd = endIndex ?? waypoints.length - 1;
+  if (startIndex >= actualEnd || waypoints.length < 2) {
+    return { totalDistance: 0, estimatedTime: 0, batteryUsage: 0 };
+  }
+  let distance = 0;
+  for (let i = startIndex + 1; i <= actualEnd; i++) {
+    distance += haversine(
+      waypoints[i - 1].lat, waypoints[i - 1].lng,
+      waypoints[i].lat, waypoints[i].lng
+    );
+  }
+  const segmentWps = waypoints.slice(startIndex, actualEnd + 1);
+  const avgSpeed = segmentWps.reduce((s, w) => s + w.speed, 0) / (segmentWps.length || 1);
+  const time = distance / (avgSpeed || 1);
+  const minutes = time / 60;
+  const battery = (minutes * config.consumptionRate / config.batteryCapacity) * 100;
+  return {
+    totalDistance: distance,
+    estimatedTime: time,
+    batteryUsage: Math.min(100, battery),
+  };
+}
+
+export function calculateProgressFromIndex(
+  totalDistance: number,
+  flownDistance: number
+): number {
+  if (totalDistance <= 0) return 0;
+  return Math.min(100, (flownDistance / totalDistance) * 100);
+}
+
+export function findWaypointIndexById(waypoints: Waypoint[], id: string): number {
+  return waypoints.findIndex((w) => w.id === id);
+}

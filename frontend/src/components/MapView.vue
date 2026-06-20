@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch, nextTick } from 'vue';
+import { onMounted, onUnmounted, ref, watch, nextTick, computed } from 'vue';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { useDroneStore } from '../store/drone';
@@ -8,11 +8,15 @@ const store = useDroneStore();
 const mapContainer = ref<HTMLElement>();
 let map: L.Map | null = null;
 let waypointLayer: L.LayerGroup | null = null;
-let routeLayer: L.Polyline | null = null;
+let routeLayerFlown: L.Polyline | null = null;
+let routeLayerRemaining: L.Polyline | null = null;
 let zoneLayer: L.LayerGroup | null = null;
 let droneMarker: L.CircleMarker | null = null;
 
 const addMode = ref(false);
+
+const completedWpIds = computed(() => new Set(store.flightProgress.waypointsCompleted));
+const currentWpIndex = computed(() => store.flightProgress.currentWaypointIndex);
 
 function initMap() {
   if (!mapContainer.value || map) return;
@@ -54,22 +58,67 @@ function drawNoFlyZones() {
 function drawWaypoints() {
   if (!waypointLayer) return;
   waypointLayer.clearLayers();
+  const completed = completedWpIds.value;
+  const currentIdx = currentWpIndex.value;
   store.waypoints.forEach((wp, idx) => {
+    const isCompleted = completed.has(wp.id) || idx < currentIdx;
+    const isCurrent = idx === currentIdx && store.isSimulating;
+    const isInterruptPoint = idx === currentIdx && store.isInterrupted;
+
+    let color = '#3b82f6';
+    let fillColor = '#60a5fa';
+    let radius = 8;
+    let weight = 2;
+    let dashArray: string | undefined;
+
+    if (isCompleted) {
+      color = '#22c55e';
+      fillColor = '#16a34a';
+    }
+    if (isCurrent) {
+      color = '#fbbf24';
+      fillColor = '#f59e0b';
+      radius = 12;
+      weight = 3;
+      dashArray = '4,2';
+    }
+    if (isInterruptPoint) {
+      color = '#ef4444';
+      fillColor = '#dc2626';
+      radius = 12;
+      weight = 3;
+      dashArray = '2,2';
+    }
+
     const marker = L.circleMarker([wp.lat, wp.lng], {
-      radius: 8,
-      color: '#3b82f6',
-      fillColor: '#60a5fa',
+      radius,
+      color,
+      fillColor,
       fillOpacity: 0.9,
-      weight: 2,
+      weight,
+      dashArray,
     });
-    marker.bindTooltip(`WP${idx + 1}`, { permanent: true, direction: 'top', className: 'wp-tooltip' });
+
+    const labelPrefix = isInterruptPoint ? '⚠ ' : isCurrent ? '📍 ' : isCompleted ? '✓ ' : '';
+    marker.bindTooltip(`${labelPrefix}WP${idx + 1}`, {
+      permanent: true,
+      direction: 'top',
+      className: 'wp-tooltip ' + (isCompleted ? 'wp-completed' : isCurrent || isInterruptPoint ? 'wp-active' : ''),
+    });
+
+    const statusTag =
+      isInterruptPoint ? '<span style="color:#ef4444">中断点</span>' :
+      isCurrent ? '<span style="color:#f59e0b">当前位置</span>' :
+      isCompleted ? '<span style="color:#22c55e">已飞过</span>' :
+      '<span style="color:#94a3b8">未飞</span>';
+
     marker.bindPopup(`
       <div style="min-width:160px">
-        <b>Waypoint ${idx + 1}</b><br>
-        Altitude: ${wp.altitude}m<br>
-        Speed: ${wp.speed} m/s<br>
-        Action: ${wp.action}<br>
-        <button onclick="this.closest('.leaflet-popup').remove()" style="margin-top:4px;color:#ef4444">Remove</button>
+        <b>航点 ${idx + 1}</b> ${statusTag ? '(' + statusTag + ')' : ''}<br>
+        高度: ${wp.altitude}m<br>
+        速度: ${wp.speed} m/s<br>
+        动作: ${wp.action}<br>
+        <button onclick="this.closest('.leaflet-popup').remove()" style="margin-top:4px;color:#ef4444">删除</button>
       </div>
     `);
     marker.on('dragend', (e: any) => {
@@ -81,64 +130,108 @@ function drawWaypoints() {
 }
 
 function drawRoute() {
-  if (routeLayer && map) {
-    map.removeLayer(routeLayer);
-    routeLayer = null;
+  if (routeLayerFlown && map) {
+    map.removeLayer(routeLayerFlown);
+    routeLayerFlown = null;
+  }
+  if (routeLayerRemaining && map) {
+    map.removeLayer(routeLayerRemaining);
+    routeLayerRemaining = null;
   }
   if (store.waypoints.length < 2 || !map) return;
 
-  const latlngs = store.waypoints.map((w) => [w.lat, w.lng] as [number, number]);
+  const currentIdx = currentWpIndex.value;
+  const allWps = store.waypoints;
 
-  // Check near obstacles for coloring
-  let hasDanger = false;
-  for (const wp of store.waypoints) {
-    for (const zone of store.noFlyZones) {
-      const d = Math.sqrt(
-        (wp.lat - zone.center[0]) ** 2 + (wp.lng - zone.center[1]) ** 2
-      ) * 111000;
-      if (d < zone.radius * 1.5) hasDanger = true;
+  if (currentIdx > 0 && currentIdx < allWps.length) {
+    const flownCoords: [number, number][] = [];
+    for (let i = 0; i <= currentIdx; i++) {
+      flownCoords.push([allWps[i].lat, allWps[i].lng]);
     }
-  }
+    if (flownCoords.length >= 2) {
+      routeLayerFlown = L.polyline(flownCoords, {
+        color: '#22c55e',
+        weight: 4,
+        opacity: 0.85,
+      }).addTo(map);
+    }
 
-  routeLayer = L.polyline(latlngs, {
-    color: hasDanger ? '#ef4444' : '#22c55e',
-    weight: 3,
-    opacity: 0.8,
-    dashArray: hasDanger ? '8,4' : undefined,
-  }).addTo(map);
-}
-
-function drawSimDrone() {
-  if (!map || store.waypoints.length < 2) return;
-  const progress = store.simProgress / 100;
-  const totalWp = store.waypoints.length;
-  const segIdx = Math.min(Math.floor(progress * (totalWp - 1)), totalWp - 2);
-  const segProgress = (progress * (totalWp - 1)) - segIdx;
-  const wp1 = store.waypoints[segIdx];
-  const wp2 = store.waypoints[segIdx + 1];
-  const lat = wp1.lat + (wp2.lat - wp1.lat) * segProgress;
-  const lng = wp1.lng + (wp2.lng - wp1.lng) * segProgress;
-
-  if (droneMarker) {
-    droneMarker.setLatLng([lat, lng]);
+    const remainingCoords: [number, number][] = [];
+    for (let i = currentIdx; i < allWps.length; i++) {
+      remainingCoords.push([allWps[i].lat, allWps[i].lng]);
+    }
+    if (remainingCoords.length >= 2) {
+      let hasDanger = false;
+      for (let i = currentIdx; i < allWps.length; i++) {
+        const wp = allWps[i];
+        for (const zone of store.noFlyZones) {
+          const d = Math.sqrt(
+            (wp.lat - zone.center[0]) ** 2 + (wp.lng - zone.center[1]) ** 2
+          ) * 111000;
+          if (d < zone.radius * 1.5) hasDanger = true;
+        }
+      }
+      routeLayerRemaining = L.polyline(remainingCoords, {
+        color: hasDanger ? '#ef4444' : '#94a3b8',
+        weight: 3,
+        opacity: 0.6,
+        dashArray: hasDanger ? '8,4' : '6,6',
+      }).addTo(map);
+    }
   } else {
-    droneMarker = L.circleMarker([lat, lng], {
-      radius: 10,
-      color: '#fbbf24',
-      fillColor: '#f59e0b',
-      fillOpacity: 1,
+    const latlngs = store.waypoints.map((w) => [w.lat, w.lng] as [number, number]);
+    let hasDanger = false;
+    for (const wp of store.waypoints) {
+      for (const zone of store.noFlyZones) {
+        const d = Math.sqrt(
+          (wp.lat - zone.center[0]) ** 2 + (wp.lng - zone.center[1]) ** 2
+        ) * 111000;
+        if (d < zone.radius * 1.5) hasDanger = true;
+      }
+    }
+    routeLayerRemaining = L.polyline(latlngs, {
+      color: hasDanger ? '#ef4444' : '#22c55e',
       weight: 3,
+      opacity: 0.8,
+      dashArray: hasDanger ? '8,4' : undefined,
     }).addTo(map);
   }
 }
 
-watch(() => store.waypoints.length, () => {
+function drawSimDrone() {
+  if (!map || store.waypoints.length < 2) return;
+  const pos = store.getCurrentDronePosition();
+  if (!pos) return;
+
+  if (droneMarker) {
+    droneMarker.setLatLng([pos.lat, pos.lng]);
+  } else {
+    droneMarker = L.circleMarker([pos.lat, pos.lng], {
+      radius: store.isInterrupted ? 12 : 10,
+      color: store.isInterrupted ? '#ef4444' : '#fbbf24',
+      fillColor: store.isInterrupted ? '#dc2626' : '#f59e0b',
+      fillOpacity: 1,
+      weight: 3,
+    }).addTo(map);
+    droneMarker.bindTooltip(
+      store.isInterrupted ? '⚠ 中断' : '🚁 无人机',
+      { permanent: true, direction: 'right', className: 'drone-tooltip' }
+    );
+  }
+}
+
+watch(() => [store.waypoints.length, store.waypoints], () => {
   drawWaypoints();
   drawRoute();
-});
+}, { deep: true });
 
 watch(() => store.noFlyZones.length, drawNoFlyZones);
 watch(() => store.simProgress, drawSimDrone);
+watch(() => [store.flightProgress.currentWaypointIndex, store.isSimulating, store.isInterrupted], () => {
+  drawWaypoints();
+  drawRoute();
+  drawSimDrone();
+}, { deep: true });
 
 onMounted(() => {
   nextTick(initMap);
@@ -187,6 +280,34 @@ function handlePlanRoute() {
         清除
       </button>
     </div>
+
+    <div class="absolute bottom-2 left-2 z-[1000] bg-slate-900/90 rounded p-2 text-[10px] space-y-1 border border-slate-700">
+      <div class="font-bold text-slate-300 mb-1">图例</div>
+      <div class="flex items-center gap-1.5">
+        <span class="inline-block w-3 h-3 rounded-full bg-green-500"></span>
+        <span class="text-slate-400">已飞过</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="inline-block w-3 h-3 rounded-full bg-blue-500"></span>
+        <span class="text-slate-400">未飞航点</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="inline-block w-3 h-3 rounded-full bg-amber-500"></span>
+        <span class="text-slate-400">当前位置</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="inline-block w-3 h-3 rounded-full bg-red-500"></span>
+        <span class="text-slate-400">中断点</span>
+      </div>
+      <div class="flex items-center gap-1.5 pt-1 border-t border-slate-700 mt-1">
+        <span class="inline-block w-5 h-1 bg-green-500"></span>
+        <span class="text-slate-400">已飞航线</span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="inline-block w-5 h-1 bg-slate-400" style="border-top:2px dashed #94a3b8;background:transparent;"></span>
+        <span class="text-slate-400">待飞航线</span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -197,6 +318,26 @@ function handlePlanRoute() {
   border: 1px solid #475569;
   font-size: 10px;
   padding: 1px 4px;
+  border-radius: 4px;
+}
+:deep(.wp-tooltip.wp-completed) {
+  background: rgba(22, 101, 52, 0.85);
+  border-color: #22c55e;
+  color: #bbf7d0;
+}
+:deep(.wp-tooltip.wp-active) {
+  background: rgba(146, 64, 14, 0.85);
+  border-color: #f59e0b;
+  color: #fde68a;
+  font-weight: bold;
+}
+:deep(.drone-tooltip) {
+  background: rgba(146, 64, 14, 0.9);
+  color: #fef3c7;
+  border: 1px solid #f59e0b;
+  font-size: 10px;
+  font-weight: bold;
+  padding: 2px 6px;
   border-radius: 4px;
 }
 </style>

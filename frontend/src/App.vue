@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import MapView from './components/MapView.vue';
 import TerrainProfile from './components/TerrainProfile.vue';
 import FlightStats from './components/FlightStats.vue';
 import { useDroneStore } from './store/drone';
+import type { FlightCheckpoint } from './types';
 
 const store = useDroneStore();
+const showResumePicker = ref(false);
+const showCheckpointList = ref(false);
 
 onMounted(() => {
   store.loadMockData();
@@ -17,6 +20,32 @@ function handlePlanRoute() {
   const last = store.waypoints[store.waypoints.length - 1];
   store.planRoute([first.lat, first.lng], [last.lat, last.lng]);
 }
+
+function formatCPTime(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+}
+
+function formatCPDate(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+function handleLoadCP(cp: FlightCheckpoint) {
+  store.loadCheckpoint(cp);
+  showCheckpointList.value = false;
+}
+
+function handleResumeFromPicker() {
+  if (store.selectedResumeIndex >= 0) {
+    store.resumeFlight(store.selectedResumeIndex);
+  }
+  showResumePicker.value = false;
+}
+
+watch(() => store.selectedResumeIndex, (idx) => {
+  store.recomputeProgressToIndex(idx);
+});
 </script>
 
 <template>
@@ -26,9 +55,18 @@ function handlePlanRoute() {
       <h1 class="text-lg font-bold text-sky-400">
         🛸 无人机 3D 航线规划与地形避障
       </h1>
-      <div class="text-xs text-slate-500">
-        航点: {{ store.waypoints.length }} |
-        禁区: {{ store.noFlyZones.length }}
+      <div class="text-xs text-slate-500 flex items-center gap-3">
+        <span>航点: {{ store.waypoints.length }}</span>
+        <span>禁区: {{ store.noFlyZones.length }}</span>
+        <span v-if="store.resumeCount > 0" class="text-purple-400">
+          已续飞: {{ store.resumeCount }}次
+        </span>
+        <span v-if="store.isSimulating" class="text-amber-400 animate-pulse">
+          ● 飞行中
+        </span>
+        <span v-else-if="store.isInterrupted" class="text-red-400">
+          ◼ 已中断
+        </span>
       </div>
     </header>
 
@@ -77,9 +115,9 @@ function handlePlanRoute() {
           </div>
         </div>
 
-        <!-- Actions -->
+        <!-- Actions: flight simulation & resume -->
         <div class="bg-slate-800 rounded-lg p-3 space-y-2">
-          <h3 class="text-xs font-semibold text-slate-300 mb-2">操作</h3>
+          <h3 class="text-xs font-semibold text-slate-300 mb-2">🚁 飞行控制</h3>
           <button
             @click="handlePlanRoute"
             :disabled="store.waypoints.length < 2"
@@ -87,25 +125,97 @@ function handlePlanRoute() {
           >
             🧭 规划航线
           </button>
-          <button
-            @click="store.simulateFlight()"
-            :disabled="store.isSimulating || store.waypoints.length < 2"
-            class="w-full py-2 rounded text-xs font-medium bg-amber-700 text-white hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed transition"
-          >
-            {{ store.isSimulating ? '飞行中...' : '▶ 模拟飞行' }}
-          </button>
+
+          <!-- Simulate/Interrupt/Resume buttons -->
+          <div class="grid grid-cols-2 gap-2">
+            <button
+              v-if="!store.isSimulating && !store.isInterrupted"
+              @click="store.simulateFlight()"
+              :disabled="store.waypoints.length < 2 || store.simProgress >= 100"
+              class="py-2 rounded text-xs font-medium bg-amber-700 text-white hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              ▶ 模拟飞行
+            </button>
+            <button
+              v-if="store.isSimulating"
+              @click="store.interruptFlight()"
+              class="py-2 rounded text-xs font-medium bg-red-700 text-white hover:bg-red-600 transition col-span-2 animate-pulse"
+            >
+              ⏸ 中断飞行（保存断点）
+            </button>
+            <template v-if="store.isInterrupted">
+              <button
+                @click="store.resumeFlight()"
+                class="py-2 rounded text-xs font-medium bg-emerald-700 text-white hover:bg-emerald-600 transition"
+              >
+                ▶ 继续飞行
+              </button>
+              <button
+                @click="showResumePicker = !showResumePicker"
+                class="py-2 rounded text-xs font-medium bg-sky-700 text-white hover:bg-sky-600 transition"
+              >
+                🎯 选择航点恢复
+              </button>
+            </template>
+          </div>
+
+          <!-- Resume from specific waypoint picker -->
+          <div v-if="showResumePicker" class="bg-slate-900 rounded p-2 space-y-2">
+            <div class="text-[10px] text-slate-400">选择从第几个航点恢复飞行：</div>
+            <input
+              type="range"
+              :min="0"
+              :max="Math.max(0, store.waypoints.length - 1)"
+              v-model.number="store.selectedResumeIndex"
+              class="w-full"
+            />
+            <div class="flex justify-between text-[10px]">
+              <span class="text-slate-500">WP1</span>
+              <span class="text-sky-300 font-bold">
+                #{{ store.selectedResumeIndex + 1 }} / {{ store.waypoints.length }}
+              </span>
+              <span class="text-slate-500">WP{{ store.waypoints.length }}</span>
+            </div>
+            <div v-if="store.resumedSegmentStats.totalDistance > 0" class="grid grid-cols-3 gap-1 text-[10px] pt-1 border-t border-slate-700">
+              <div class="text-slate-400">
+                距离: <span class="text-emerald-400">{{ (store.resumedSegmentStats.totalDistance / 1000).toFixed(2) }}km</span>
+              </div>
+              <div class="text-slate-400">
+                时间: <span class="text-sky-400">{{ Math.floor(store.resumedSegmentStats.estimatedTime / 60) }}m</span>
+              </div>
+              <div class="text-slate-400">
+                电量: <span class="text-amber-400">{{ store.resumedSegmentStats.batteryUsage.toFixed(0) }}%</span>
+              </div>
+            </div>
+            <button
+              @click="handleResumeFromPicker"
+              :disabled="store.waypoints.length < 2"
+              class="w-full py-1.5 rounded text-[10px] font-medium bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-40 transition"
+            >
+              ✅ 从此航点恢复飞行
+            </button>
+          </div>
 
           <!-- Progress bar -->
           <div v-if="store.isSimulating || store.simProgress > 0" class="space-y-1">
             <div class="flex justify-between text-[10px] text-slate-400">
               <span>模拟进度</span>
-              <span>{{ store.simProgress }}%</span>
+              <span>{{ store.simProgress.toFixed(0) }}%</span>
             </div>
             <div class="w-full bg-slate-700 rounded-full h-2">
               <div
-                class="h-2 rounded-full transition-all bg-amber-500"
+                class="h-2 rounded-full transition-all"
+                :class="{
+                  'bg-amber-500': store.isSimulating,
+                  'bg-red-500': store.isInterrupted,
+                  'bg-emerald-500': !store.isSimulating && !store.isInterrupted && store.simProgress >= 100,
+                  'bg-sky-500': !store.isSimulating && !store.isInterrupted && store.simProgress < 100,
+                }"
                 :style="{ width: store.simProgress + '%' }"
               />
+            </div>
+            <div v-if="store.isInterrupted" class="text-[10px] text-red-400 text-center pt-1">
+              ⚠ 飞行已中断，可选择恢复或从某航点续飞
             </div>
           </div>
 
@@ -115,6 +225,60 @@ function handlePlanRoute() {
           >
             🗑 清除航线
           </button>
+        </div>
+
+        <!-- Checkpoints history -->
+        <div class="bg-slate-800 rounded-lg p-3 space-y-2">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-semibold text-slate-300">💾 断点历史</h3>
+            <button
+              v-if="store.hasCheckpoints"
+              @click="showCheckpointList = !showCheckpointList"
+              class="text-[10px] text-sky-400 hover:text-sky-300 transition"
+            >
+              {{ showCheckpointList ? '收起' : `查看(${store.checkpoints.length})` }}
+            </button>
+            <span v-else class="text-[10px] text-slate-500">暂无</span>
+          </div>
+          <div v-if="showCheckpointList && store.hasCheckpoints" class="space-y-1 max-h-[200px] overflow-y-auto">
+            <div
+              v-for="cp in store.checkpoints"
+              :key="cp.id"
+              class="bg-slate-900 rounded p-2 space-y-1 border border-slate-700"
+            >
+              <div class="flex justify-between items-center">
+                <span class="text-[10px] text-slate-400">
+                  {{ formatCPDate(cp.createdAt) }} {{ formatCPTime(cp.createdAt) }}
+                </span>
+                <button
+                  @click="store.deleteCheckpoint(cp.id)"
+                  class="text-[10px] text-red-400 hover:text-red-300 transition"
+                >
+                  删除
+                </button>
+              </div>
+              <div class="grid grid-cols-2 gap-1 text-[10px]">
+                <div class="text-slate-500">
+                  中断航点: <span class="text-sky-300">#{{ cp.interruptedAtWaypointIndex + 1 }}</span>
+                </div>
+                <div class="text-slate-500">
+                  进度: <span class="text-amber-300">{{ ((cp.progress.flownDistance / (cp.totalStats.totalDistance || 1)) * 100).toFixed(0) }}%</span>
+                </div>
+                <div class="text-slate-500">
+                  已飞: <span class="text-emerald-400">{{ (cp.progress.flownDistance / 1000).toFixed(2) }}km</span>
+                </div>
+                <div class="text-slate-500">
+                  剩余: <span class="text-purple-400">{{ (cp.remainingStats.totalDistance / 1000).toFixed(2) }}km</span>
+                </div>
+              </div>
+              <button
+                @click="handleLoadCP(cp)"
+                class="w-full py-1 rounded text-[10px] font-medium bg-sky-700 text-white hover:bg-sky-600 transition"
+              >
+                📥 加载此断点
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- Flight stats -->
