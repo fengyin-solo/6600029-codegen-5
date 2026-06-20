@@ -200,21 +200,58 @@ function drawRoute() {
 
 function drawSimDrone() {
   if (!map || store.waypoints.length < 2) return;
+  const shouldShowDrone =
+    store.isSimulating ||
+    store.isInterrupted ||
+    store.flightProgress.currentWaypointIndex > 0 ||
+    store.simProgress > 0;
+
+  if (!shouldShowDrone) {
+    if (droneMarker) {
+      map.removeLayer(droneMarker);
+      droneMarker = null;
+    }
+    return;
+  }
+
   const pos = store.getCurrentDronePosition();
   if (!pos) return;
 
   if (droneMarker) {
     droneMarker.setLatLng([pos.lat, pos.lng]);
+    if (store.isInterrupted) {
+      droneMarker.setStyle({
+        radius: 12,
+        color: '#ef4444',
+        fillColor: '#dc2626',
+      });
+      droneMarker.setTooltipContent('⚠ 中断');
+    } else if (store.isSimulating) {
+      droneMarker.setStyle({
+        radius: 10,
+        color: '#fbbf24',
+        fillColor: '#f59e0b',
+      });
+      droneMarker.setTooltipContent('🚁 无人机');
+    } else {
+      droneMarker.setStyle({
+        radius: 9,
+        color: '#60a5fa',
+        fillColor: '#3b82f6',
+      });
+      droneMarker.setTooltipContent('📍 起点');
+    }
   } else {
+    const isInt = store.isInterrupted;
     droneMarker = L.circleMarker([pos.lat, pos.lng], {
-      radius: store.isInterrupted ? 12 : 10,
-      color: store.isInterrupted ? '#ef4444' : '#fbbf24',
-      fillColor: store.isInterrupted ? '#dc2626' : '#f59e0b',
+      radius: isInt ? 12 : 10,
+      color: isInt ? '#ef4444' : '#fbbf24',
+      fillColor: isInt ? '#dc2626' : '#f59e0b',
       fillOpacity: 1,
       weight: 3,
     }).addTo(map);
     droneMarker.bindTooltip(
-      store.isInterrupted ? '⚠ 中断' : '🚁 无人机',
+      isInt ? '⚠ 中断' : '🚁 无人机',
       { permanent: true, direction: 'right', className: 'drone-tooltip' }
     );
   }

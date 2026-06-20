@@ -60,6 +60,7 @@ export const useDroneStore = defineStore('drone', () => {
   const checkpoints = ref<FlightCheckpoint[]>(loadCheckpointsFromStorage());
   const flightProgress = ref<FlightProgress>(createInitialProgress());
   const selectedResumeIndex = ref<number>(0);
+  const previewResumeIndex = ref<number>(0);
 
   const droneConfig = ref<DroneConfig>({
     maxAltitude: 500,
@@ -104,6 +105,11 @@ export const useDroneStore = defineStore('drone', () => {
     waypoints.value = smoothed;
     updatePlan();
     resetFlightProgress();
+    selectedResumeIndex.value = 0;
+    previewResumeIndex.value = 0;
+    isInterrupted.value = false;
+    isSimulating.value = false;
+    simProgress.value = 0;
   }
 
   function clearRoute() {
@@ -114,11 +120,12 @@ export const useDroneStore = defineStore('drone', () => {
     isSimulating.value = false;
     isInterrupted.value = false;
     resetFlightProgress();
+    selectedResumeIndex.value = 0;
+    previewResumeIndex.value = 0;
   }
 
   function resetFlightProgress() {
     flightProgress.value = createInitialProgress();
-    selectedResumeIndex.value = 0;
   }
 
   function updatePlan() {
@@ -157,6 +164,7 @@ export const useDroneStore = defineStore('drone', () => {
     if (nextIdx >= totalWps) {
       simProgress.value = 100;
       isSimulating.value = false;
+      isInterrupted.value = false;
       stopSimInterval();
       return;
     }
@@ -187,14 +195,17 @@ export const useDroneStore = defineStore('drone', () => {
 
   function simulateFlight() {
     if (waypoints.value.length < 2 || isSimulating.value) return;
-    isSimulating.value = true;
-    isInterrupted.value = false;
+
     if (flightProgress.value.startTime === null) {
       flightProgress.value.startTime = Date.now();
     }
+
+    isSimulating.value = true;
+    isInterrupted.value = false;
+
     simInterval = setInterval(() => {
       advanceSimulationStep();
-    }, 300);
+    }, 800);
   }
 
   function interruptFlight() {
@@ -203,16 +214,21 @@ export const useDroneStore = defineStore('drone', () => {
     isSimulating.value = false;
     isInterrupted.value = true;
     flightProgress.value.interruptTime = Date.now();
+    selectedResumeIndex.value = flightProgress.value.currentWaypointIndex;
+    previewResumeIndex.value = flightProgress.value.currentWaypointIndex;
     saveCheckpoint();
   }
 
   function resumeFlight(fromIndex?: number) {
     if (waypoints.value.length < 2) return;
+
     if (fromIndex !== undefined) {
-      if (fromIndex < 0) return;
-      if (fromIndex >= waypoints.value.length) return;
-      recomputeProgressToIndex(fromIndex);
+      const clamped = Math.max(0, Math.min(fromIndex, waypoints.value.length - 1));
+      if (clamped !== flightProgress.value.currentWaypointIndex) {
+        recomputeProgressToIndex(clamped);
+      }
     }
+
     flightProgress.value.resumeCount += 1;
     isInterrupted.value = false;
     simulateFlight();
@@ -221,10 +237,15 @@ export const useDroneStore = defineStore('drone', () => {
   function recomputeProgressToIndex(targetIndex: number) {
     if (waypoints.value.length < 2) return;
     const clamped = Math.max(0, Math.min(targetIndex, waypoints.value.length - 1));
+    if (clamped === 0) {
+      resetFlightProgress();
+      simProgress.value = 0;
+      return;
+    }
     const flownStats = calculateSegmentStats(waypoints.value, droneConfig.value, 0, clamped);
     flightProgress.value.currentWaypointIndex = clamped;
     flightProgress.value.waypointsCompleted = waypoints.value
-      .slice(0, clamped + 1)
+      .slice(1, clamped + 1)
       .map((w) => w.id);
     flightProgress.value.flownDistance = flownStats.totalDistance;
     flightProgress.value.elapsedTime = flownStats.estimatedTime;
@@ -234,6 +255,14 @@ export const useDroneStore = defineStore('drone', () => {
     }
     const total = currentPlan.value?.totalDistance || 1;
     simProgress.value = Math.min(100, (flownStats.totalDistance / total) * 100);
+  }
+
+  function previewProgressToIndex(targetIndex: number): FlightSegmentStats {
+    if (waypoints.value.length < 2) {
+      return { totalDistance: 0, estimatedTime: 0, batteryUsage: 0 };
+    }
+    const clamped = Math.max(0, Math.min(targetIndex, waypoints.value.length - 1));
+    return calculateSegmentStats(waypoints.value, droneConfig.value, clamped);
   }
 
   function saveCheckpoint(): FlightCheckpoint | null {
@@ -279,21 +308,22 @@ export const useDroneStore = defineStore('drone', () => {
 
   function loadCheckpoint(cp: FlightCheckpoint) {
     if (!cp.remainingWaypoints || cp.remainingWaypoints.length === 0) return;
-    waypoints.value = [...cp.progress.waypointsCompleted.map((id) => {
-      const found = cp.completedWaypoints.find((w) => w.id === id);
-      if (found) return found;
-      return cp.completedWaypoints[cp.completedWaypoints.length - 1];
-    }), ...cp.remainingWaypoints.slice(1)];
 
-    const unique: Waypoint[] = [];
-    const seen = new Set<string>();
-    for (const wp of waypoints.value) {
-      if (!seen.has(wp.id)) {
-        seen.add(wp.id);
-        unique.push(wp);
+    const allWpIds = new Set<string>();
+    const allWps: Waypoint[] = [];
+    for (const w of cp.completedWaypoints) {
+      if (!allWpIds.has(w.id)) {
+        allWpIds.add(w.id);
+        allWps.push(w);
       }
     }
-    waypoints.value = unique;
+    for (const w of cp.remainingWaypoints) {
+      if (!allWpIds.has(w.id)) {
+        allWpIds.add(w.id);
+        allWps.push(w);
+      }
+    }
+    waypoints.value = allWps;
 
     currentPlan.value = {
       id: cp.planId,
@@ -303,8 +333,11 @@ export const useDroneStore = defineStore('drone', () => {
       estimatedTime: cp.totalStats.estimatedTime,
       batteryUsage: cp.totalStats.batteryUsage,
     };
+
     flightProgress.value = JSON.parse(JSON.stringify(cp.progress));
     selectedResumeIndex.value = cp.interruptedAtWaypointIndex;
+    previewResumeIndex.value = cp.interruptedAtWaypointIndex;
+
     simProgress.value = Math.min(
       100,
       (flightProgress.value.flownDistance / (cp.totalStats.totalDistance || 1)) * 100
@@ -379,12 +412,20 @@ export const useDroneStore = defineStore('drone', () => {
     });
   });
 
-  const resumedSegmentStats = computed<FlightSegmentStats>(() => {
-    const idx = selectedResumeIndex.value;
-    return calculateSegmentStats(waypoints.value, droneConfig.value, idx);
-  });
-
   const hasCheckpoints = computed(() => checkpoints.value.length > 0);
+
+  const canInterrupt = computed(() => isSimulating.value && waypoints.value.length >= 2);
+  const canResume = computed(() =>
+    (isInterrupted.value || flightProgress.value.currentWaypointIndex > 0) &&
+    !isSimulating.value &&
+    waypoints.value.length >= 2 &&
+    flightProgress.value.currentWaypointIndex < waypoints.value.length - 1
+  );
+  const canSimulate = computed(() =>
+    !isSimulating.value &&
+    waypoints.value.length >= 2 &&
+    flightProgress.value.currentWaypointIndex < waypoints.value.length - 1
+  );
 
   return {
     waypoints,
@@ -399,6 +440,7 @@ export const useDroneStore = defineStore('drone', () => {
     mapCenter,
     flightProgress,
     selectedResumeIndex,
+    previewResumeIndex,
     checkpoints,
     totalDistance,
     estimatedTime,
@@ -414,8 +456,10 @@ export const useDroneStore = defineStore('drone', () => {
     waypointsRemainingCount,
     resumeCount,
     terrainProfile,
-    resumedSegmentStats,
     hasCheckpoints,
+    canInterrupt,
+    canResume,
+    canSimulate,
     addWaypoint,
     removeWaypoint,
     updateWaypoint,
@@ -425,6 +469,7 @@ export const useDroneStore = defineStore('drone', () => {
     interruptFlight,
     resumeFlight,
     recomputeProgressToIndex,
+    previewProgressToIndex,
     saveCheckpoint,
     deleteCheckpoint,
     loadCheckpoint,

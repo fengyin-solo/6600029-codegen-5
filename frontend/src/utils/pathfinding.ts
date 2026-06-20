@@ -228,7 +228,7 @@ export function rrtPathfind(
 }
 
 // ─── Catmull-Rom Spline Smoothing ───────────────────────────────────────────
-export function smoothPath(waypoints: Waypoint[], segments = 5): Waypoint[] {
+export function smoothPath(waypoints: Waypoint[], segments = 2): Waypoint[] {
   if (waypoints.length < 3) return [...waypoints];
 
   const result: Waypoint[] = [waypoints[0]];

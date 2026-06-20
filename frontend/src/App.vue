@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue';
+import { onMounted, ref, computed } from 'vue';
 import MapView from './components/MapView.vue';
 import TerrainProfile from './components/TerrainProfile.vue';
 import FlightStats from './components/FlightStats.vue';
@@ -9,6 +9,7 @@ import type { FlightCheckpoint } from './types';
 const store = useDroneStore();
 const showResumePicker = ref(false);
 const showCheckpointList = ref(false);
+const localPreviewIndex = ref(0);
 
 onMounted(() => {
   store.loadMockData();
@@ -19,6 +20,8 @@ function handlePlanRoute() {
   const first = store.waypoints[0];
   const last = store.waypoints[store.waypoints.length - 1];
   store.planRoute([first.lat, first.lng], [last.lat, last.lng]);
+  localPreviewIndex.value = 0;
+  showResumePicker.value = false;
 }
 
 function formatCPTime(ts: number): string {
@@ -34,18 +37,36 @@ function formatCPDate(ts: number): string {
 function handleLoadCP(cp: FlightCheckpoint) {
   store.loadCheckpoint(cp);
   showCheckpointList.value = false;
+  showResumePicker.value = false;
+  localPreviewIndex.value = store.previewResumeIndex;
 }
 
+function openResumePicker() {
+  localPreviewIndex.value = store.selectedResumeIndex;
+  showResumePicker.value = true;
+}
+
+const previewStats = computed(() => {
+  return store.previewProgressToIndex(localPreviewIndex.value);
+});
+
 function handleResumeFromPicker() {
-  if (store.selectedResumeIndex >= 0) {
-    store.resumeFlight(store.selectedResumeIndex);
-  }
+  const idx = localPreviewIndex.value;
+  store.resumeFlight(idx);
   showResumePicker.value = false;
 }
 
-watch(() => store.selectedResumeIndex, (idx) => {
-  store.recomputeProgressToIndex(idx);
-});
+function handleResumeDirect() {
+  store.resumeFlight();
+}
+
+function handleStartFlight() {
+  if (localPreviewIndex.value > 0) {
+    store.resumeFlight(localPreviewIndex.value);
+  } else {
+    store.simulateFlight();
+  }
+}
 </script>
 
 <template>
@@ -128,63 +149,122 @@ watch(() => store.selectedResumeIndex, (idx) => {
 
           <!-- Simulate/Interrupt/Resume buttons -->
           <div class="grid grid-cols-2 gap-2">
+            <!-- 飞行中：只显示中断按钮 -->
             <button
-              v-if="!store.isSimulating && !store.isInterrupted"
-              @click="store.simulateFlight()"
-              :disabled="store.waypoints.length < 2 || store.simProgress >= 100"
-              class="py-2 rounded text-xs font-medium bg-amber-700 text-white hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed transition"
-            >
-              ▶ 模拟飞行
-            </button>
-            <button
-              v-if="store.isSimulating"
+              v-if="store.canInterrupt"
               @click="store.interruptFlight()"
               class="py-2 rounded text-xs font-medium bg-red-700 text-white hover:bg-red-600 transition col-span-2 animate-pulse"
             >
               ⏸ 中断飞行（保存断点）
             </button>
-            <template v-if="store.isInterrupted">
+
+            <!-- 中断后：显示继续飞行 和 选择航点恢复 -->
+            <template v-else-if="store.canResume">
               <button
-                @click="store.resumeFlight()"
+                @click="handleResumeDirect"
                 class="py-2 rounded text-xs font-medium bg-emerald-700 text-white hover:bg-emerald-600 transition"
               >
                 ▶ 继续飞行
               </button>
               <button
-                @click="showResumePicker = !showResumePicker"
+                @click="openResumePicker"
                 class="py-2 rounded text-xs font-medium bg-sky-700 text-white hover:bg-sky-600 transition"
               >
                 🎯 选择航点恢复
               </button>
             </template>
+
+            <!-- 未开始或已完成：显示开始飞行按钮 -->
+            <button
+              v-else-if="store.canSimulate"
+              @click="handleStartFlight"
+              :disabled="store.waypoints.length < 2"
+              class="py-2 rounded text-xs font-medium bg-amber-700 text-white hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed transition col-span-2"
+            >
+              {{ store.simProgress > 0 ? '▶ 从开头重新飞行' : '▶ 开始模拟飞行' }}
+            </button>
+
+            <button
+              v-else-if="store.simProgress >= 100"
+              @click="store.recomputeProgressToIndex(0); localPreviewIndex = 0"
+              class="py-2 rounded text-xs font-medium bg-sky-700 text-white hover:bg-sky-600 transition col-span-2"
+            >
+              🔄 重置并重新飞行
+            </button>
           </div>
 
-          <!-- Resume from specific waypoint picker -->
-          <div v-if="showResumePicker" class="bg-slate-900 rounded p-2 space-y-2">
-            <div class="text-[10px] text-slate-400">选择从第几个航点恢复飞行：</div>
+          <!-- Pre-flight resume picker (always visible when there are waypoints) -->
+          <div
+            v-if="store.waypoints.length >= 2 && !store.isSimulating && store.simProgress < 100"
+            class="bg-slate-900 rounded p-2 space-y-2"
+          >
+            <div class="flex justify-between items-center">
+              <span class="text-[10px] text-slate-400">选择起点航点：</span>
+              <span class="text-[10px] text-sky-400">
+                预飞 #{{ localPreviewIndex + 1 }}
+              </span>
+            </div>
             <input
               type="range"
               :min="0"
               :max="Math.max(0, store.waypoints.length - 1)"
-              v-model.number="store.selectedResumeIndex"
+              v-model.number="localPreviewIndex"
+              class="w-full"
+            />
+            <div class="flex justify-between text-[10px]">
+              <span class="text-slate-500">WP1 (起点)</span>
+              <span class="text-sky-300 font-bold">
+                #{{ localPreviewIndex + 1 }} / {{ store.waypoints.length }}
+              </span>
+              <span class="text-slate-500">WP{{ store.waypoints.length }} (终点)</span>
+            </div>
+            <div v-if="localPreviewIndex > 0 && previewStats.totalDistance > 0" class="grid grid-cols-3 gap-1 text-[10px] pt-1 border-t border-slate-700">
+              <div class="text-slate-400">
+                已飞: <span class="text-emerald-400">{{ (store.totalDistance / 1000 - previewStats.totalDistance / 1000).toFixed(2) }}km</span>
+              </div>
+              <div class="text-slate-400">
+                剩余: <span class="text-amber-400">{{ (previewStats.totalDistance / 1000).toFixed(2) }}km</span>
+              </div>
+              <div class="text-slate-400">
+                耗电: <span class="text-purple-400">{{ previewStats.batteryUsage.toFixed(0) }}%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Resume from specific waypoint picker (interrupt mode) -->
+          <div v-if="showResumePicker && store.isInterrupted" class="bg-slate-900 rounded p-2 space-y-2 border border-red-900/50">
+            <div class="flex justify-between items-center">
+              <span class="text-[10px] text-slate-400">选择从第几个航点恢复飞行：</span>
+              <button
+                @click="showResumePicker = false"
+                class="text-[10px] text-slate-500 hover:text-slate-300"
+              >
+                ✕
+              </button>
+            </div>
+            <input
+              type="range"
+              :min="0"
+              :max="Math.max(0, store.waypoints.length - 1)"
+              v-model.number="localPreviewIndex"
               class="w-full"
             />
             <div class="flex justify-between text-[10px]">
               <span class="text-slate-500">WP1</span>
               <span class="text-sky-300 font-bold">
-                #{{ store.selectedResumeIndex + 1 }} / {{ store.waypoints.length }}
+                #{{ localPreviewIndex + 1 }} / {{ store.waypoints.length }}
               </span>
               <span class="text-slate-500">WP{{ store.waypoints.length }}</span>
             </div>
-            <div v-if="store.resumedSegmentStats.totalDistance > 0" class="grid grid-cols-3 gap-1 text-[10px] pt-1 border-t border-slate-700">
+            <div v-if="localPreviewIndex > 0" class="grid grid-cols-3 gap-1 text-[10px] pt-1 border-t border-slate-700">
               <div class="text-slate-400">
-                距离: <span class="text-emerald-400">{{ (store.resumedSegmentStats.totalDistance / 1000).toFixed(2) }}km</span>
+                已飞: <span class="text-emerald-400">{{ ((store.totalDistance - previewStats.totalDistance) / 1000).toFixed(2) }}km</span>
               </div>
               <div class="text-slate-400">
-                时间: <span class="text-sky-400">{{ Math.floor(store.resumedSegmentStats.estimatedTime / 60) }}m</span>
+                剩余: <span class="text-amber-400">{{ (previewStats.totalDistance / 1000).toFixed(2) }}km</span>
               </div>
               <div class="text-slate-400">
-                电量: <span class="text-amber-400">{{ store.resumedSegmentStats.batteryUsage.toFixed(0) }}%</span>
+                余电: <span class="text-purple-400">{{ (100 - previewStats.batteryUsage).toFixed(0) }}%</span>
               </div>
             </div>
             <button
@@ -192,7 +272,7 @@ watch(() => store.selectedResumeIndex, (idx) => {
               :disabled="store.waypoints.length < 2"
               class="w-full py-1.5 rounded text-[10px] font-medium bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-40 transition"
             >
-              ✅ 从此航点恢复飞行
+              ✅ 从 #{{ localPreviewIndex + 1 }} 航点恢复飞行
             </button>
           </div>
 
